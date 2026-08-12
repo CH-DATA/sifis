@@ -5,6 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SIFIS · Sistema Informático de Fiscalización Sanitaria</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import { getFirestore, collection, addDoc, deleteDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCUVAftqS-exa-nykvYUxH5fFP_SPBBZ6s",
+    authDomain: "sifis-ef356.firebaseapp.com",
+    projectId: "sifis-ef356",
+    storageBucket: "sifis-ef356.firebasestorage.app",
+    messagingSenderId: "642969810302",
+    appId: "1:642969810302:web:591f4102e9d6250f77af2f",
+    measurementId: "G-F3LPKR3G80"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+  const registrosCol = collection(db, "registros");
+
+  // Exponemos lo necesario para que el resto del script (no-módulo) lo use
+  window.__fb = { db, registrosCol, addDoc, deleteDoc, doc, onSnapshot };
+  window.dispatchEvent(new Event('fbReady'));
+</script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700;800&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
   :root{
@@ -738,7 +760,7 @@
 </div>
 </div>
 
-  <footer>Los registros solo existen durante esta sesión (no se almacenan en servidores) · Usa "Exportar CSV" para guardar un respaldo</footer>
+  <footer>Registros sincronizados en tiempo real con Firebase · Usa "Exportar CSV" para guardar un respaldo</footer>
   </div><!-- /view-dashboard -->
 
 </div><!-- /wrap -->
@@ -799,16 +821,39 @@ let DATA = [];
 let FILTERED = [];
 let selectedMonths = new Set();
 
-async function loadData(){
-  // No se cargan ni se guardan datos de sesiones anteriores: todo empieza en blanco.
-  DATA = [];
-  const statusEl = document.getElementById('statusText');
-  if(statusEl) statusEl.textContent = "Sesión en blanco — sin registros";
-  updateAlertBadge();
+function waitForFirebase(){
+  return new Promise(resolve=>{
+    if(window.__fb) return resolve();
+    window.addEventListener('fbReady', ()=>resolve(), {once:true});
+  });
 }
-async function saveData(){
-  // Almacenamiento deshabilitado a propósito: los registros solo viven en esta sesión.
-  return;
+
+async function loadData(){
+  await waitForFirebase();
+  const { registrosCol, onSnapshot } = window.__fb;
+  const statusEl = document.getElementById('statusText');
+  return new Promise((resolve)=>{
+    let first = true;
+    onSnapshot(registrosCol, (snapshot)=>{
+      DATA = snapshot.docs.map(d=>({ id: d.id, ...d.data() }));
+      if(statusEl) statusEl.textContent = DATA.length ? (DATA.length+" registro(s) sincronizado(s)") : "Sin registros aún";
+      populateRazonList();
+      updateAlertBadge();
+      render();
+      if(first){ first = false; resolve(); }
+    }, (err)=>{
+      console.error("Error de Firestore:", err);
+      if(statusEl) statusEl.textContent = "Error de conexión con Firebase";
+      if(first){ first = false; resolve(); }
+    });
+  });
+}
+
+async function saveData(record){
+  await waitForFirebase();
+  const { registrosCol, addDoc } = window.__fb;
+  await addDoc(registrosCol, record);
+  // Firestore notificará el cambio vía onSnapshot y actualizará DATA/render automáticamente
 }
 
 function normInspector(n){
@@ -1227,14 +1272,24 @@ document.getElementById('btnGuardar').addEventListener('click', async ()=>{
   }
 
   const record = {
-    id: "r-"+Date.now(),
     fecha: vals.fechaDisplay, inspector: vals.inspector, razon: vals.razon,
     comercial: vals.comercial, zona: vals.zona, direccion: vals.direccion,
     ruc: vals.ruc, giro: vals.giro, tipo: vals.tipo,
     codigo: vals.codigo, dias: vals.dias, ficha: vals.ficha, operativo: vals.operativo
   };
-  DATA.push(record);
-  await saveData();
+
+  msg.style.color = 'var(--text-soft)';
+  msg.textContent = 'Guardando en Firebase…';
+
+  try{
+    await saveData(record);
+  }catch(err){
+    console.error(err);
+    msg.style.color = 'var(--stamp-red)';
+    msg.textContent = 'No se pudo guardar en Firebase. Revisa tu conexión e intenta de nuevo.';
+    return;
+  }
+
   updateAlertBadge();
 
   // efecto de sello animado sobre la credencial
@@ -1242,7 +1297,7 @@ document.getElementById('btnGuardar').addEventListener('click', async ()=>{
   fx.classList.remove('play'); void fx.offsetWidth; fx.classList.add('play');
 
   msg.style.color = 'var(--acta-green)';
-  msg.textContent = '✓ Registro guardado (' + DATA.length + ' en total)';
+  msg.textContent = '✓ Registro guardado en Firebase';
 
   showSaveModal(record);
 });
@@ -1284,10 +1339,15 @@ document.getElementById('modalCloseBtn').addEventListener('click', ()=>{
 /* ---------- DELETE ---------- */
 async function deleteRecord(id){
   if(!confirm('¿Eliminar este registro? Esta acción no se puede deshacer.')) return;
-  DATA = DATA.filter(d=>d.id!==id);
-  await saveData();
-  updateAlertBadge();
-  render();
+  try{
+    await waitForFirebase();
+    const { db, doc, deleteDoc } = window.__fb;
+    await deleteDoc(doc(db, "registros", id));
+    // onSnapshot detecta el borrado y actualiza DATA/render automáticamente
+  }catch(err){
+    console.error(err);
+    alert('No se pudo eliminar el registro. Revisa tu conexión a internet.');
+  }
 }
 window.deleteRecord = deleteRecord;
 
